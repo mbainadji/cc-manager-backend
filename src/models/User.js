@@ -8,6 +8,8 @@ const userSchema = new mongoose.Schema({
   group: { type: String, trim: true },
   // absent tant que l'étudiant n'a pas activé son compte
   passwordHash: { type: String, select: false },
+  // hash du code d'activation remis à l'étudiant
+  activationHash: { type: String, select: false },
 }, { timestamps: true })
 
 export default mongoose.model('User', userSchema)

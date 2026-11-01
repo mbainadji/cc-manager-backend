@@ -6,6 +6,7 @@ import User from '../models/User.js'
 import Exam from '../models/Exam.js'
 import Grade from '../models/Grade.js'
 import { requireAuth } from '../middleware/auth.js'
+import { newCode, hashCode } from '../utils/activation.js'
 
 const r = Router()
 r.use(requireAuth('professor'))
@@ -67,12 +68,15 @@ r.post('/import', async (req, res) => {
 
   const ops = []
   const conflicts = []
+  const codes = []
   let created = 0, updated = 0, skipped = 0
   for (const row of rows) {
     const u = byKey.get(key(row.matricule))
     if (!u) {
       // matricule inconnu : ajouté
-      ops.push({ insertOne: { document: { role: 'student', ...row } } })
+      const code = newCode()
+      ops.push({ insertOne: { document: { role: 'student', ...row, activationHash: hashCode(code) } } })
+      codes.push({ matricule: row.matricule, fullName: row.fullName, group: row.group, code })
       created++
     } else if (normName(u.fullName) !== normName(row.fullName)) {
       // même matricule, nom différent : rien n'est modifié, l'enseignant corrige à la main
@@ -86,7 +90,21 @@ r.post('/import', async (req, res) => {
     }
   }
   if (ops.length) await User.bulkWrite(ops)
-  res.status(201).json({ created, updated, skipped, ignored, conflicts: conflicts.length, conflictMatricules: conflicts.slice(0, 10) })
+  res.status(201).json({ created, updated, skipped, ignored, codes, conflicts: conflicts.length, conflictMatricules: conflicts.slice(0, 10) })
+})
+
+// Codes d'activation : générés pour les étudiants qui n'en ont pas encore.
+// body { regenerate: true } : remplace aussi les codes des étudiants SANS compte (code perdu).
+// Le code d'un étudiant déjà inscrit n'est jamais remplacé.
+r.post('/codes', async (req, res) => {
+  const regenerate = req.body?.regenerate === true
+  const students = await User.find({ role: 'student' }).select('+passwordHash +activationHash').sort({ fullName: 1 })
+  const out = students
+    .filter((s) => !s.activationHash || (regenerate && !s.passwordHash))
+    .map((s) => ({ id: s._id, matricule: s.matricule, fullName: s.fullName, group: s.group ?? '', code: newCode() }))
+  if (out.length)
+    await User.bulkWrite(out.map((o) => ({ updateOne: { filter: { _id: o.id }, update: { $set: { activationHash: hashCode(o.code) } } } })))
+  res.json({ count: out.length, codes: out.map(({ id, ...rest }) => rest) })
 })
 
 // Suppression : seulement un étudiant sans compte (erreur d'import)

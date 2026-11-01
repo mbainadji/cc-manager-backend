@@ -2,6 +2,7 @@ import { Router } from 'express'
 import bcrypt from 'bcryptjs'
 import User from '../models/User.js'
 import { sign, requireAuth } from '../middleware/auth.js'
+import { codeMatches } from '../utils/activation.js'
 
 const r = Router()
 const safe = (u) => ({ id: u._id, role: u.role, name: u.fullName, matricule: u.matricule, email: u.email })
@@ -18,18 +19,18 @@ const normGroup = (s = '') =>
 const byMatricule = (matricule) =>
   User.findOne({ role: 'student', matricule: String(matricule ?? '').trim() })
     .collation({ locale: 'fr', strength: 2 })
-    .select('+passwordHash')
+    .select('+passwordHash +activationHash')
 
 // Inscription : réservée aux étudiants de la liste importée par le professeur
 r.post('/student/register', async (req, res) => {
-  const { fullName, matricule, group, password } = req.body
-  if (!fullName?.trim() || !matricule?.trim() || !group?.trim() || !password || password.length < 8)
-    return res.status(400).json({ message: 'Nom, matricule, groupe et mot de passe (8 caractères min.) requis' })
+  const { fullName, matricule, group, code, password } = req.body
+  if (!fullName?.trim() || !matricule?.trim() || !group?.trim() || !code?.trim() || !password || password.length < 8)
+    return res.status(400).json({ message: 'Nom, matricule, groupe, code et mot de passe (8 caractères min.) requis' })
 
   const user = await byMatricule(matricule)
   // même message pour matricule inconnu et nom différent : on ne confirme pas quels matricules existent
-  if (!user || norm(user.fullName) !== norm(fullName) || normGroup(user.group) !== normGroup(group))
-    return res.status(400).json({ message: 'Ces informations (nom, matricule, groupe) ne figurent pas dans la liste de votre établissement. Vérifiez-les ou contactez votre enseignant.' })
+  if (!user || norm(user.fullName) !== norm(fullName) || normGroup(user.group) !== normGroup(group) || !codeMatches(user.activationHash, code))
+    return res.status(400).json({ message: 'Ces informations (nom, matricule, groupe, code) ne figurent pas dans la liste de votre établissement. Vérifiez-les ou contactez votre enseignant.' })
   if (user.passwordHash)
     return res.status(409).json({ message: 'Ce matricule a déjà un compte. Connectez-vous.' })
 
