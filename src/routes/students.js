@@ -1,15 +1,25 @@
 import { Router } from 'express'
+import crypto from 'crypto'
+import bcrypt from 'bcryptjs'
+import mongoose from 'mongoose'
 import User from '../models/User.js'
 import Exam from '../models/Exam.js'
+import Grade from '../models/Grade.js'
 import { requireAuth } from '../middleware/auth.js'
 
 const r = Router()
 r.use(requireAuth('professor'))
 
-// Étudiants inscrits, avec les examens du professeur auxquels ils sont rattachés
+const MAX_ROWS = 2000
+const key = (m) => String(m).trim().toLowerCase()
+
+const findStudent = (id) =>
+  mongoose.isValidObjectId(id) ? User.findOne({ _id: id, role: 'student' }).select('+passwordHash') : null
+
+// Tous les étudiants de la liste, inscrits ou non, avec leurs examens
 r.get('/', async (req, res) => {
   const [list, exams] = await Promise.all([
-    User.find({ role: 'student', passwordHash: { $exists: true } }).sort({ fullName: 1 }),
+    User.find({ role: 'student' }).select('+passwordHash').sort({ fullName: 1 }),
     Exam.find({ professor: req.user.id }).select('allStudents students'),
   ])
   res.json(list.map((s) => ({
@@ -17,10 +27,79 @@ r.get('/', async (req, res) => {
     matricule: s.matricule,
     fullName: s.fullName,
     createdAt: s.createdAt,
+    registered: !!s.passwordHash,
     examIds: exams
       .filter((e) => e.allStudents || e.students.some((x) => String(x) === String(s._id)))
       .map((e) => String(e._id)),
   })))
+})
+
+// Import : body = { students: [{ matricule, fullName }] }
+// Nouveau matricule : ajouté. Matricule existant sans compte : nom mis à jour. Avec compte : inchangé.
+r.post('/import', async (req, res) => {
+  const raw = Array.isArray(req.body.students) ? req.body.students : []
+  if (raw.length > MAX_ROWS) return res.status(400).json({ message: `Maximum ${MAX_ROWS} lignes par import` })
+
+  const seen = new Set()
+  const rows = []
+  let ignored = 0
+  for (const s of raw) {
+    const matricule = String(s?.matricule ?? '').trim()
+    const fullName = String(s?.fullName ?? '').trim().replace(/\s+/g, ' ')
+    if (!matricule || !fullName || matricule.length > 40 || fullName.length > 120 || seen.has(key(matricule))) {
+      ignored++
+      continue
+    }
+    seen.add(key(matricule))
+    rows.push({ matricule, fullName })
+  }
+  if (!rows.length) return res.status(400).json({ message: 'Aucun étudiant valide dans la liste' })
+
+  const existing = await User.find({ role: 'student', matricule: { $in: rows.map((x) => x.matricule) } })
+    .collation({ locale: 'fr', strength: 2 })
+    .select('+passwordHash')
+  const byKey = new Map(existing.map((u) => [key(u.matricule), u]))
+
+  const ops = []
+  let created = 0, updated = 0, skipped = 0
+  for (const row of rows) {
+    const u = byKey.get(key(row.matricule))
+    if (!u) {
+      ops.push({ insertOne: { document: { role: 'student', ...row } } })
+      created++
+    } else if (!u.passwordHash && u.fullName !== row.fullName) {
+      ops.push({ updateOne: { filter: { _id: u._id }, update: { $set: { fullName: row.fullName } } } })
+      updated++
+    } else {
+      skipped++
+    }
+  }
+  if (ops.length) await User.bulkWrite(ops)
+  res.status(201).json({ created, updated, skipped, ignored })
+})
+
+// Réinitialisation : seulement pour un étudiant qui a déjà un compte
+r.post('/:id/reset-password', async (req, res) => {
+  const student = await findStudent(req.params.id)
+  if (!student) return res.status(404).json({ message: 'Étudiant introuvable' })
+  if (!student.passwordHash)
+    return res.status(409).json({ message: "Cet étudiant n'a pas encore créé son compte" })
+  const password = crypto.randomBytes(6).toString('base64url') // 8 caractères
+  student.passwordHash = await bcrypt.hash(password, 10)
+  await student.save()
+  res.json({ password })
+})
+
+// Suppression : seulement un étudiant sans compte (erreur d'import)
+r.delete('/:id', async (req, res) => {
+  const student = await findStudent(req.params.id)
+  if (!student) return res.status(404).json({ message: 'Étudiant introuvable' })
+  if (student.passwordHash)
+    return res.status(409).json({ message: 'Un étudiant qui a créé son compte ne peut pas être supprimé' })
+  await Grade.deleteMany({ student: student._id })
+  await Exam.updateMany({ students: student._id }, { $pull: { students: student._id } })
+  await student.deleteOne()
+  res.status(204).end()
 })
 
 export default r

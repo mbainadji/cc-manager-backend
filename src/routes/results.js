@@ -27,6 +27,7 @@ const view = (g) => ({
   max: g.exam.maxScore,
   teacher: g.exam.professor ? `Pr. ${g.exam.professor.fullName}` : '',
   comment: g.comment,
+  correctedAt: g.correctedAt,
 })
 
 r.get('/', async (req, res) => {

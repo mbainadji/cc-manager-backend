@@ -16,22 +16,27 @@ const byMatricule = (matricule) =>
     .collation({ locale: 'fr', strength: 2 })
     .select('+passwordHash')
 
-// Inscription : crée le compte, l'étudiant entre aussitôt dans la liste du professeur
+// Inscription : réservée aux étudiants de la liste importée par le professeur
 r.post('/student/register', async (req, res) => {
   const { fullName, matricule, password } = req.body
   if (!fullName?.trim() || !matricule?.trim() || !password || password.length < 8)
     return res.status(400).json({ message: 'Nom, matricule et mot de passe (8 caractères min.) requis' })
 
-  if (await byMatricule(matricule))
-    return res.status(409).json({ message: 'Ce matricule est déjà inscrit' })
+  const user = await byMatricule(matricule)
+  // même message pour matricule inconnu et nom différent : on ne confirme pas quels matricules existent
+  if (!user || norm(user.fullName) !== norm(fullName))
+    return res.status(400).json({ message: 'Ce nom et ce matricule ne figurent pas dans la liste de votre établissement' })
+  if (user.passwordHash)
+    return res.status(409).json({ message: 'Ce matricule a déjà un compte. Connectez-vous.' })
 
-  const user = await User.create({
-    role: 'student',
-    fullName: fullName.trim().replace(/\s+/g, ' '),
-    matricule: matricule.trim(),
-    passwordHash: await bcrypt.hash(password, 10),
-  })
-  res.status(201).json({ token: sign(user), user: safe(user) })
+  // mise à jour atomique : si deux inscriptions arrivent en même temps, une seule passe
+  const claimed = await User.findOneAndUpdate(
+    { _id: user._id, passwordHash: { $exists: false } },
+    { $set: { passwordHash: await bcrypt.hash(password, 10) } },
+    { new: true },
+  )
+  if (!claimed) return res.status(409).json({ message: 'Ce matricule a déjà un compte. Connectez-vous.' })
+  res.status(201).json({ token: sign(claimed), user: safe(claimed) })
 })
 
 // Connexion : nom + matricule + mot de passe, les trois doivent être corrects
@@ -52,6 +57,20 @@ r.post('/professor/login', async (req, res) => {
   if (!user || !(await bcrypt.compare(password || '', user.passwordHash)))
     return res.status(401).json({ message: 'Identifiants incorrects' })
   res.json({ token: sign(user), user: safe(user) })
+})
+
+// Changement de mot de passe (étudiant ou professeur)
+// 400 et non 401 : le 401 déconnecterait l'utilisateur côté front
+r.patch('/password', requireAuth(), async (req, res) => {
+  const { currentPassword, newPassword } = req.body
+  if (!newPassword || newPassword.length < 8)
+    return res.status(400).json({ message: 'Le nouveau mot de passe doit faire 8 caractères minimum' })
+  const user = await User.findById(req.user.id).select('+passwordHash')
+  if (!user?.passwordHash || !(await bcrypt.compare(currentPassword || '', user.passwordHash)))
+    return res.status(400).json({ message: 'Mot de passe actuel incorrect' })
+  user.passwordHash = await bcrypt.hash(newPassword, 10)
+  await user.save()
+  res.json({ ok: true })
 })
 
 r.get('/me', requireAuth(), async (req, res) => {

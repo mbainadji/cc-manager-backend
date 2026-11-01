@@ -8,7 +8,7 @@ import { requireAuth } from '../middleware/auth.js'
 const r = Router()
 r.use(requireAuth('professor'))
 
-const registered = { role: 'student', passwordHash: { $exists: true } }
+const registered = { role: 'student' }
 
 // Examen appartenant au professeur connecté (null sinon)
 const own = (req) =>
@@ -83,24 +83,49 @@ r.get('/:id', async (req, res) => {
   const exam = await own(req)
   if (!exam) return res.status(404).json({ message: 'Examen introuvable' })
   const ids = (await roster(exam)).map((s) => s._id)
-  res.json(view(exam, ids.length, await countGraded(exam, ids)))
+  res.json({ ...view(exam, ids.length, await countGraded(exam, ids)), studentIds: exam.students })
 })
 
+// Modification : après publication, seuls les libellés et la date changent
 r.patch('/:id', async (req, res) => {
   const exam = await own(req)
   if (!exam) return res.status(404).json({ message: 'Examen introuvable' })
-  if (exam.status === 'published') return res.status(409).json({ message: 'Examen déjà publié' })
-  for (const k of ['title', 'subject', 'description', 'date', 'maxScore']) if (k in req.body) exam[k] = req.body[k]
-  if ('allStudents' in req.body) exam.allStudents = req.body.allStudents !== false
-  if ('students' in req.body) exam.students = await pickStudents(req.body.students)
+  const locked = exam.status === 'published'
+
+  for (const k of ['title', 'subject', 'description', 'date']) {
+    if (!(k in req.body)) continue
+    if ((k === 'title' || k === 'subject') && !String(req.body[k]).trim())
+      return res.status(400).json({ message: 'Titre et matière ne peuvent pas être vides' })
+    if (k === 'date' && Number.isNaN(new Date(req.body.date).getTime()))
+      return res.status(400).json({ message: 'Date invalide' })
+    exam[k] = req.body[k]
+  }
+
+  if (!locked) {
+    if ('maxScore' in req.body) {
+      const max = Number(req.body.maxScore)
+      if (!(max >= 1)) return res.status(400).json({ message: 'Barème invalide' })
+      const over = await Grade.countDocuments({ exam: exam._id, score: { $gt: max } })
+      if (over) return res.status(409).json({ message: `Des notes dépassent ${max} : corrigez-les d'abord` })
+      exam.maxScore = max
+    }
+    if ('allStudents' in req.body) exam.allStudents = req.body.allStudents !== false
+    if ('students' in req.body) exam.students = await pickStudents(req.body.students)
+    if (!exam.allStudents && exam.students.length === 0)
+      return res.status(400).json({ message: 'Sélectionnez au moins un étudiant' })
+  }
+
+  await exam.save()
   const { total, graded } = await refresh(exam)
-  res.json(view(exam, total, graded))
+  const ids = (await roster(exam)).map((s) => s._id)
+  res.json(view(exam, total, locked ? await countGraded(exam, ids) : graded))
 })
 
 r.delete('/:id', async (req, res) => {
   const exam = await own(req)
   if (!exam) return res.status(404).json({ message: 'Examen introuvable' })
-  if (exam.status === 'published') return res.status(409).json({ message: 'Examen déjà publié' })
+  if (exam.status === 'published')
+    return res.status(409).json({ message: 'Un examen publié ne peut pas être supprimé' })
   await Grade.deleteMany({ exam: exam._id })
   await exam.deleteOne()
   res.status(204).end()
@@ -120,28 +145,41 @@ r.get('/:id/grades', async (req, res) => {
   })))
 })
 
-// body : { grades: [{ studentId, score, comment }] }
+// body : { grades: [{ studentId, score, comment }]}. Modifiable aussi après publication.
 r.put('/:id/grades', async (req, res) => {
   const exam = await own(req)
   if (!exam) return res.status(404).json({ message: 'Examen introuvable' })
-  if (exam.status === 'published') return res.status(409).json({ message: 'Notes verrouillées' })
   const list = Array.isArray(req.body.grades) ? req.body.grades : []
   if (!list.length) return res.status(400).json({ message: 'Aucune note à enregistrer' })
 
+  const published = exam.status === 'published'
   const enrolled = new Set((await roster(exam)).map((s) => String(s._id)))
+  const before = new Map(
+    (await Grade.find({ exam: exam._id })).map((g) => [String(g.student), g]),
+  )
+
   for (const g of list) {
     if (!enrolled.has(String(g.studentId)))
       return res.status(400).json({ message: 'Étudiant non concerné par cet examen' })
     if (g.score != null && (typeof g.score !== 'number' || g.score < 0 || g.score > exam.maxScore))
       return res.status(400).json({ message: `Note invalide (0 à ${exam.maxScore})` })
+    if (published && g.score == null && before.get(String(g.studentId))?.score != null)
+      return res.status(400).json({ message: 'Une note publiée peut être corrigée, pas retirée' })
   }
-  await Grade.bulkWrite(list.map((g) => ({
-    updateOne: {
-      filter: { exam: exam._id, student: g.studentId },
-      update: { $set: { score: g.score ?? null, comment: g.comment ?? '' } },
-      upsert: true,
-    },
-  })))
+
+  await Grade.bulkWrite(list.map((g) => {
+    const prev = before.get(String(g.studentId))
+    const score = g.score ?? null
+    const comment = g.comment ?? ''
+    const changed = !prev || prev.score !== score || prev.comment !== comment
+    return {
+      updateOne: {
+        filter: { exam: exam._id, student: g.studentId },
+        update: { $set: { score, comment, ...(published && changed ? { correctedAt: new Date() } : {}) } },
+        upsert: true,
+      },
+    }
+  }))
   const { total, graded } = await refresh(exam)
   res.json({ saved: list.length, status: exam.status, graded, total })
 })

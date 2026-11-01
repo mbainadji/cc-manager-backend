@@ -5,6 +5,8 @@ const gradeSchema = new mongoose.Schema({
   student: { type: mongoose.Schema.Types.ObjectId, ref: 'User', required: true },
   score: { type: Number, default: null },
   comment: { type: String, default: '' },
+  // renseigné quand une note est modifiée après la publication
+  correctedAt: { type: Date, default: null },
 }, { timestamps: true })
 
 gradeSchema.index({ exam: 1, student: 1 }, { unique: true })
