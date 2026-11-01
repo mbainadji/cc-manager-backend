@@ -89,18 +89,6 @@ r.post('/import', async (req, res) => {
   res.status(201).json({ created, updated, skipped, ignored, conflicts: conflicts.length, conflictMatricules: conflicts.slice(0, 10) })
 })
 
-// Réinitialisation : seulement pour un étudiant qui a déjà un compte
-r.post('/:id/reset-password', async (req, res) => {
-  const student = await findStudent(req.params.id)
-  if (!student) return res.status(404).json({ message: 'Étudiant introuvable' })
-  if (!student.passwordHash)
-    return res.status(409).json({ message: "Cet étudiant n'a pas encore créé son compte" })
-  const password = crypto.randomBytes(6).toString('base64url') // 8 caractères
-  student.passwordHash = await bcrypt.hash(password, 10)
-  await student.save()
-  res.json({ password })
-})
-
 // Suppression : seulement un étudiant sans compte (erreur d'import)
 r.delete('/:id', async (req, res) => {
   const student = await findStudent(req.params.id)
