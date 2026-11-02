@@ -80,7 +80,7 @@ r.post('/import', async (req, res) => {
       created++
     } else if (normName(u.fullName) !== normName(row.fullName)) {
       // même matricule, nom différent : rien n'est modifié, l'enseignant corrige à la main
-      conflicts.push(row.matricule)
+      conflicts.push({ matricule: row.matricule, fileName: row.fullName, dbName: u.fullName })
     } else if (!u.group && row.group) {
       // déjà présent, groupe encore vide : on le complète
       ops.push({ updateOne: { filter: { _id: u._id }, update: { $set: { group: row.group } } } })
@@ -90,7 +90,7 @@ r.post('/import', async (req, res) => {
     }
   }
   if (ops.length) await User.bulkWrite(ops)
-  res.status(201).json({ created, updated, skipped, ignored, codes, conflicts: conflicts.length, conflictMatricules: conflicts.slice(0, 10) })
+  res.status(201).json({ created, updated, skipped, ignored, codes, conflicts: conflicts.length, conflictList: conflicts.slice(0, 50) })
 })
 
 // Codes d'activation : générés pour les étudiants qui n'en ont pas encore.
@@ -100,7 +100,7 @@ r.post('/codes', async (req, res) => {
   const regenerate = req.body?.regenerate === true
   const students = await User.find({ role: 'student' }).select('+passwordHash +activationHash').sort({ fullName: 1 })
   const out = students
-    .filter((s) => !s.activationHash || (regenerate && !s.passwordHash))
+    .filter((s) => !s.passwordHash && (!s.activationHash || regenerate))
     .map((s) => ({ id: s._id, matricule: s.matricule, fullName: s.fullName, group: s.group ?? '', code: newCode() }))
   if (out.length)
     await User.bulkWrite(out.map((o) => ({ updateOne: { filter: { _id: o.id }, update: { $set: { activationHash: hashCode(o.code) } } } })))

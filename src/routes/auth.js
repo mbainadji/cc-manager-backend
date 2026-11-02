@@ -2,7 +2,7 @@ import { Router } from 'express'
 import bcrypt from 'bcryptjs'
 import User from '../models/User.js'
 import { sign, requireAuth } from '../middleware/auth.js'
-import { codeMatches } from '../utils/activation.js'
+import { codeMatches, newCode, hashCode } from '../utils/activation.js'
 
 const r = Router()
 const safe = (u) => ({ id: u._id, role: u.role, name: u.fullName, matricule: u.matricule, email: u.email })
@@ -19,7 +19,7 @@ const normGroup = (s = '') =>
 const byMatricule = (matricule) =>
   User.findOne({ role: 'student', matricule: String(matricule ?? '').trim() })
     .collation({ locale: 'fr', strength: 2 })
-    .select('+passwordHash +activationHash')
+    .select('+passwordHash +activationHash +recoveryHash')
 
 // Inscription : réservée aux étudiants de la liste importée par le professeur
 r.post('/student/register', async (req, res) => {
@@ -35,13 +35,42 @@ r.post('/student/register', async (req, res) => {
     return res.status(409).json({ message: 'Ce matricule a déjà un compte. Connectez-vous.' })
 
   // mise à jour atomique : si deux inscriptions arrivent en même temps, une seule passe
+  const recovery = newCode() // code de récupération : montré une seule fois à l'étudiant
   const claimed = await User.findOneAndUpdate(
     { _id: user._id, passwordHash: { $exists: false } },
-    { $set: { passwordHash: await bcrypt.hash(password, 10) } },
+    { $set: { passwordHash: await bcrypt.hash(password, 10), recoveryHash: hashCode(recovery) }, $unset: { activationHash: '' } },
     { new: true },
   )
   if (!claimed) return res.status(409).json({ message: 'Ce matricule a déjà un compte. Connectez-vous.' })
-  res.status(201).json({ token: sign(claimed), user: safe(claimed) })
+  res.status(201).json({ token: sign(claimed), user: safe(claimed), recoveryCode: recovery })
+})
+
+// Mot de passe oublié : matricule + code de récupération personnel. L'enseignant n'intervient pas.
+// Le code est à usage unique : un nouveau est renvoyé et doit être noté.
+r.post('/student/reset', async (req, res) => {
+  const { matricule, recoveryCode, password } = req.body
+  if (!matricule?.trim() || !recoveryCode?.trim() || !password || password.length < 8)
+    return res.status(400).json({ message: 'Matricule, code de récupération et nouveau mot de passe (8 caractères min.) requis' })
+
+  const user = await byMatricule(matricule)
+  if (!user || !user.passwordHash || !codeMatches(user.recoveryHash, recoveryCode))
+    return res.status(400).json({ message: 'Matricule ou code de récupération incorrect' })
+
+  const next = newCode()
+  await User.updateOne({ _id: user._id }, {
+    $set: { passwordHash: await bcrypt.hash(password, 10), recoveryHash: hashCode(next) },
+  })
+  res.json({ recoveryCode: next })
+})
+
+// Nouveau code de récupération pour un étudiant connecté (mot de passe demandé). L'ancien ne fonctionne plus.
+r.post('/student/recovery', requireAuth('student'), async (req, res) => {
+  const user = await User.findById(req.user.id).select('+passwordHash')
+  if (!user?.passwordHash || !(await bcrypt.compare(String(req.body?.password ?? ''), user.passwordHash)))
+    return res.status(400).json({ message: 'Mot de passe incorrect' })
+  const next = newCode()
+  await User.updateOne({ _id: user._id }, { $set: { recoveryHash: hashCode(next) } })
+  res.json({ recoveryCode: next })
 })
 
 // Connexion : nom + matricule + mot de passe, les trois doivent être corrects
