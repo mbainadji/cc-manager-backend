@@ -2,6 +2,7 @@ import { Router } from 'express'
 import mongoose from 'mongoose'
 import Exam from '../models/Exam.js'
 import Grade from '../models/Grade.js'
+import GradeLog from '../models/GradeLog.js'
 import User from '../models/User.js'
 import { requireAuth } from '../middleware/auth.js'
 
@@ -22,12 +23,12 @@ const roster = (exam) =>
 
 const view = (e, studentsCount, gradedCount = 0) => ({
   id: e._id, title: e.title, subject: e.subject, description: e.description,
-  date: e.date, maxScore: e.maxScore, status: e.status, publishedAt: e.publishedAt,
+  date: e.date, maxScore: e.maxScore, coefficient: e.coefficient ?? 1, status: e.status, publishedAt: e.publishedAt,
   allStudents: e.allStudents, studentsCount, gradedCount,
 })
 
 const countGraded = (exam, ids) =>
-  Grade.countDocuments({ exam: exam._id, student: { $in: ids }, score: { $ne: null } })
+  Grade.countDocuments({ exam: exam._id, student: { $in: ids }, $or: [{ score: { $ne: null } }, { absent: true }] })
 
 // brouillon -> saisie en cours -> prêt à publier, selon les notes saisies
 const refresh = async (exam) => {
@@ -51,7 +52,7 @@ r.get('/', async (req, res) => {
   const exams = await Exam.find(filter).sort({ date: -1 })
   const totalRegistered = await User.countDocuments(registered)
   const counts = await Grade.aggregate([
-    { $match: { exam: { $in: exams.map((e) => e._id) }, score: { $ne: null } } },
+    { $match: { exam: { $in: exams.map((e) => e._id) }, $or: [{ score: { $ne: null } }, { absent: true }] } },
     { $group: { _id: '$exam', n: { $sum: 1 } } },
   ])
   const byExam = new Map(counts.map((c) => [String(c._id), c.n]))
@@ -60,8 +61,10 @@ r.get('/', async (req, res) => {
 })
 
 r.post('/', async (req, res) => {
-  const { title, subject, date, maxScore, description, allStudents, students } = req.body
+  const { title, subject, date, maxScore, coefficient, description, allStudents, students } = req.body
   const max = Number(maxScore ?? 20)
+  const coef = Number(coefficient ?? 1)
+  if (!(coef > 0)) return res.status(400).json({ message: 'Coefficient invalide' })
   if (!title?.trim() || !subject?.trim() || !date || Number.isNaN(new Date(date).getTime()))
     return res.status(400).json({ message: 'Titre, matière et date sont requis' })
   if (!(max >= 1)) return res.status(400).json({ message: 'Barème invalide' })
@@ -72,7 +75,7 @@ r.post('/', async (req, res) => {
     return res.status(400).json({ message: 'Sélectionnez au moins un étudiant' })
 
   const exam = await Exam.create({
-    title, subject, description, date, maxScore: max,
+    title, subject, description, date, maxScore: max, coefficient: coef,
     allStudents: all, students: picked, professor: req.user.id,
   })
   const { total } = await refresh(exam)
@@ -109,6 +112,11 @@ r.patch('/:id', async (req, res) => {
       if (over) return res.status(409).json({ message: `Des notes dépassent ${max} : corrigez-les d'abord` })
       exam.maxScore = max
     }
+    if ('coefficient' in req.body) {
+      const coef = Number(req.body.coefficient)
+      if (!(coef > 0)) return res.status(400).json({ message: 'Coefficient invalide' })
+      exam.coefficient = coef
+    }
     if ('allStudents' in req.body) exam.allStudents = req.body.allStudents !== false
     if ('students' in req.body) exam.students = await pickStudents(req.body.students)
     if (!exam.allStudents && exam.students.length === 0)
@@ -127,6 +135,7 @@ r.delete('/:id', async (req, res) => {
   if (exam.status === 'published')
     return res.status(409).json({ message: 'Un examen publié ne peut pas être supprimé' })
   await Grade.deleteMany({ exam: exam._id })
+  await GradeLog.deleteMany({ exam: exam._id })
   await exam.deleteOne()
   res.status(204).end()
 })
@@ -142,6 +151,7 @@ r.get('/:id/grades', async (req, res) => {
     studentId: s._id, fullName: s.fullName, matricule: s.matricule,
     score: byStudent.get(String(s._id))?.score ?? null,
     comment: byStudent.get(String(s._id))?.comment ?? '',
+    absent: byStudent.get(String(s._id))?.absent ?? false,
   })))
 })
 
@@ -167,20 +177,28 @@ r.put('/:id/grades', async (req, res) => {
       return res.status(400).json({ message: 'Une note publiée peut être corrigée, pas retirée' })
   }
 
+  const logs = []
   await Grade.bulkWrite(list.map((g) => {
     const prev = before.get(String(g.studentId))
-    const score = g.score ?? null
+    const absent = g.absent === true
+    const score = absent ? null : (g.score ?? null)
     const comment = g.comment ?? ''
-    const changed = !prev || prev.score !== score || prev.comment !== comment
+    const changed = !prev || prev.score !== score || prev.comment !== comment || (prev.absent ?? false) !== absent
+    if (changed) logs.push({
+      exam: exam._id, student: g.studentId, by: req.user.id,
+      before: prev ? { score: prev.score, comment: prev.comment, absent: prev.absent ?? false } : null,
+      after: { score, comment, absent },
+    })
     return {
       updateOne: {
         filter: { exam: exam._id, student: g.studentId },
-        update: { $set: { score, comment, ...(published && changed ? { correctedAt: new Date() } : {}) } },
+        update: { $set: { score, comment, absent, ...(published && changed ? { correctedAt: new Date() } : {}) } },
         upsert: true,
       },
     }
   }))
   const { total, graded } = await refresh(exam)
+  if (logs.length) await GradeLog.insertMany(logs)
   res.json({ saved: list.length, status: exam.status, graded, total })
 })
 
@@ -195,6 +213,19 @@ r.post('/:id/publish', async (req, res) => {
   exam.publishedAt = new Date()
   await exam.save()
   res.json(view(exam, total, graded))
+})
+
+// Historique des modifications de notes (professeur de l'examen uniquement)
+r.get('/:id/history', async (req, res) => {
+  const exam = await own(req)
+  if (!exam) return res.status(404).json({ message: 'Examen introuvable' })
+  const logs = await GradeLog.find({ exam: exam._id }).sort({ createdAt: -1 }).limit(200)
+    .populate({ path: 'student', select: 'fullName matricule' })
+  res.json(logs.map((l) => ({
+    id: l._id, at: l.createdAt,
+    student: l.student ? { fullName: l.student.fullName, matricule: l.student.matricule } : null,
+    before: l.before, after: l.after,
+  })))
 })
 
 export default r

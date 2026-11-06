@@ -5,7 +5,7 @@ import { sign, requireAuth } from '../middleware/auth.js'
 import { codeMatches, newCode, hashCode } from '../utils/activation.js'
 
 const r = Router()
-const safe = (u) => ({ id: u._id, role: u.role, name: u.fullName, matricule: u.matricule, email: u.email })
+const safe = (u) => ({ id: u._id, role: u.role, name: u.fullName, matricule: u.matricule, email: u.email, isAdmin: !!u.isAdmin })
 
 // Nom : insensible à la casse, aux accents et à l'ordre ("Koné Aïcha" = "aicha kone")
 const norm = (s = '') =>

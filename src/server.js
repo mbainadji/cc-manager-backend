@@ -8,6 +8,7 @@ import auth from './routes/auth.js'
 import exams from './routes/exams.js'
 import students from './routes/students.js'
 import results from './routes/results.js'
+import professors from './routes/professors.js'
 
 const app = express()
 app.use(helmet())
@@ -19,6 +20,7 @@ app.use('/api/auth', rateLimit({ windowMs: 15 * 60 * 1000, limit: 100 }), auth)
 app.use('/api/exams', exams)
 app.use('/api/students', students)
 app.use('/api/results', results)
+app.use('/api/professors', professors)
 
 app.use((err, _req, res, _next) => {
   console.error(err)

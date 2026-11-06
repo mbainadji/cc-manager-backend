@@ -6,6 +6,7 @@ const userSchema = new mongoose.Schema({
   matricule: { type: String, trim: true, unique: true, sparse: true },
   email: { type: String, trim: true, lowercase: true, unique: true, sparse: true },
   group: { type: String, trim: true },
+  isAdmin: { type: Boolean, default: false },
   // absent tant que l'étudiant n'a pas activé son compte
   passwordHash: { type: String, select: false },
   // hash du code d'activation remis à l'étudiant

@@ -11,7 +11,7 @@ const mine = async (studentId, extra = {}) => {
   const grades = await Grade.find({ student: studentId, ...extra }).populate({
     path: 'exam',
     match: { status: 'published' },
-    select: 'title subject date maxScore publishedAt professor',
+    select: 'title subject date maxScore coefficient publishedAt professor',
     populate: { path: 'professor', select: 'fullName' },
   })
   return grades.filter((g) => g.exam && g.score !== null)
@@ -25,6 +25,7 @@ const view = (g) => ({
   publishedAt: g.exam.publishedAt,
   score: g.score,
   max: g.exam.maxScore,
+  coef: g.exam.coefficient ?? 1,
   teacher: g.exam.professor ? `Pr. ${g.exam.professor.fullName}` : '',
   comment: g.comment,
   correctedAt: g.correctedAt,

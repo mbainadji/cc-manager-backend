@@ -6,6 +6,7 @@ const examSchema = new mongoose.Schema({
   description: { type: String, default: '', trim: true },
   date: { type: Date, required: true },
   maxScore: { type: Number, default: 20, min: 1 },
+  coefficient: { type: Number, default: 1, min: 0.1 },
   status: { type: String, enum: ['draft', 'grading', 'ready', 'published'], default: 'draft' },
   publishedAt: { type: Date, default: null },
   // true : tous les étudiants inscrits ; false : seulement ceux de "students"
