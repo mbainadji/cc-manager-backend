@@ -15,7 +15,7 @@ app.use(cors({ origin: process.env.CLIENT_URL }))
 app.use(express.json({ limit: '1mb' }))
 
 app.get('/api/health', (_, res) => res.json({ ok: true }))
-app.use('/api/auth', rateLimit({ windowMs: 15 * 60 * 1000, limit: 30 }), auth)
+app.use('/api/auth', rateLimit({ windowMs: 15 * 60 * 1000, limit: 100 }), auth)
 app.use('/api/exams', exams)
 app.use('/api/students', students)
 app.use('/api/results', results)
